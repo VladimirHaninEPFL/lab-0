@@ -30,6 +30,12 @@ int  xdp_drop_func(struct xdp_md *ctx)
 
 char _license[] SEC("license") = "GPL";
 
+SEC("xdp")
+int  xdp_abord_func(struct xdp_md *ctx)
+{
+	return XDP_ABORTED;
+}
+
 /* Hint the avail XDP action return codes are:
 
 enum xdp_action {
