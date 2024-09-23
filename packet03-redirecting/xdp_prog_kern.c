@@ -36,16 +36,51 @@ static __always_inline void swap_src_dst_mac(struct ethhdr *eth)
 {
 	/* Assignment 1: swap source and destination addresses in the eth.
 	 * For simplicity you can use the memcpy macro defined above */
+	memcpy(eth->h_dest, eth->h_source, sizeof(eth->h_source));
 }
 
 static __always_inline void swap_src_dst_ipv6(struct ipv6hdr *ipv6)
 {
 	/* Assignment 1: swap source and destination addresses in the iphv6dr */
+	struct in6_addr tmp = ipv6->saddr;
+
+	ipv6->saddr = ipv6->daddr;
+	ipv6->daddr = tmp;
 }
 
 static __always_inline void swap_src_dst_ipv4(struct iphdr *iphdr)
 {
 	/* Assignment 1: swap source and destination addresses in the iphdr */
+	__be32 tmp = iphdr->saddr;
+
+	iphdr->saddr = iphdr->daddr;
+	iphdr->daddr = tmp;
+}
+
+static __always_inline __u16 csum_fold_helper(__u32 csum)
+{
+	__u32 sum;
+	sum = (csum >> 16) + (csum & 0xffff);
+	sum += (sum >> 16);
+	return ~sum;
+}
+
+/*
+ * The icmp_checksum_diff function takes pointers to old and new structures and
+ * the old checksum and returns the new checksum.  It uses the bpf_csum_diff
+ * helper to compute the checksum difference. Note that the sizes passed to the
+ * bpf_csum_diff helper should be multiples of 4, as it operates on 32-bit
+ * words.
+ */
+static __always_inline __u16 icmp_checksum_diff(
+		__u16 seed,
+		struct icmphdr_common *icmphdr_new,
+		struct icmphdr_common *icmphdr_old)
+{
+	__u32 csum, size = sizeof(struct icmphdr_common);
+
+	csum = bpf_csum_diff((__be32 *)icmphdr_old, size, (__be32 *)icmphdr_new, size, seed);
+	return csum_fold_helper(csum);
 }
 
 /* Implement packet03/assignment-1 in this section */
@@ -54,22 +89,24 @@ int xdp_icmp_echo_func(struct xdp_md *ctx)
 {
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
+
+	/* These keep track of the next header type and iterator pointer */
 	struct hdr_cursor nh;
+	nh.pos = data;
+
 	struct ethhdr *eth;
-	int eth_type;
-	int ip_type;
-	int icmp_type;
 	struct iphdr *iphdr;
 	struct ipv6hdr *ipv6hdr;
 	__u16 echo_reply;
 	struct icmphdr_common *icmphdr;
-	__u32 action = XDP_PASS;
+	struct icmphdr_common icmphdr_prev;
 
-	/* These keep track of the next header type and iterator pointer */
-	nh.pos = data;
+	__u32 action = XDP_PASS; // default value
+
 
 	/* Parse Ethernet and IP/IPv6 headers */
-	eth_type = parse_ethhdr(&nh, data_end, &eth);
+	int eth_type = parse_ethhdr(&nh, data_end, &eth);
+	int ip_type;
 	if (eth_type == bpf_htons(ETH_P_IP)) {
 		ip_type = parse_iphdr(&nh, data_end, &iphdr);
 		if (ip_type != IPPROTO_ICMP)
@@ -88,7 +125,7 @@ int xdp_icmp_echo_func(struct xdp_md *ctx)
 	 * header.  For purposes of this Assignment we are not interested in
 	 * the rest of the structure.
 	 */
-	icmp_type = parse_icmphdr_common(&nh, data_end, &icmphdr);
+	int icmp_type = parse_icmphdr_common(&nh, data_end, &icmphdr);
 	if (eth_type == bpf_htons(ETH_P_IP) && icmp_type == ICMP_ECHO) {
 		/* Swap IP source and destination */
 		swap_src_dst_ipv4(iphdr);
@@ -108,6 +145,14 @@ int xdp_icmp_echo_func(struct xdp_md *ctx)
 	/* Assignment 1: patch the packet and update the checksum. You can use
 	 * the echo_reply variable defined above to fix the ICMP Type field. */
 
+	/* Patch the packet and update the checksum.*/
+	unsigned short old_checksum = icmphdr->cksum;
+	icmphdr->cksum = 0;
+	icmphdr_prev = *icmphdr;
+
+	icmphdr->type = echo_reply;
+	icmphdr->cksum = icmp_checksum_diff(~old_checksum, icmphdr, &icmphdr_prev);
+
 	bpf_printk("echo_reply: %d", echo_reply);
 
 	action = XDP_TX;
@@ -126,8 +171,8 @@ int xdp_redirect_func(struct xdp_md *ctx)
 	struct ethhdr *eth;
 	int eth_type;
 	int action = XDP_PASS;
-	/* unsigned char dst[ETH_ALEN] = {} */	/* Assignment 2: fill in with the MAC address of the left inner interface */
-	/* unsigned ifindex = 0; */		/* Assignment 2: fill in with the ifindex of the left interface */
+	unsigned char dst[ETH_ALEN] = {"0e:96:a8:ce:7c:83"}; /* Assignment 2: fill in with the MAC address of the left inner interface */
+	unsigned ifindex = 2; 			  /* Assignment 2: fill in with the ifindex of the left interface */
 
 	/* These keep track of the next header type and iterator pointer */
 	nh.pos = data;
@@ -139,6 +184,8 @@ int xdp_redirect_func(struct xdp_md *ctx)
 
 	/* Assignment 2: set a proper destination address and call the
 	 * bpf_redirect() with proper parameters, action = bpf_redirect(...) */
+	memcpy(eth->h_dest, dst, ETH_ALEN);
+	action = bpf_redirect(ifindex, 0);
 
 out:
 	return xdp_stats_record_action(ctx, action);
